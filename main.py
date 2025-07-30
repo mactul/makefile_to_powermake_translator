@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import glob
 import shlex
@@ -324,6 +325,8 @@ def create_instructions(groups):
 
         if group["operation_type"] == "command":
             instructions.append(f"powermake.run_command(config, {json.dumps(group['command'])}, shell=True, cwd={json.dumps(group['command_cwd'])})")
+            print("\033[0;33mWarning:\033[0;m Verify this line in the generated powermake:")
+            print(f"\033[2;37m{instructions[-1]}\033[0;m")
             continue
 
         elif group["operation_type"] == "compile":
@@ -442,24 +445,44 @@ def create_instructions(groups):
     return project_name, instructions_count, instructions
 
 
+def generate_code(makefile_folder):
+    entries = makefile_dry_run.list_commands(["make"], makefile_folder)
+    groups = create_compilation_groups(entries)
 
-entries = makefile_dry_run.list_commands(["make"], "/home/mactul/Documents/c-cpp/plasma-keyboard/build")
-groups = create_compilation_groups(entries)
+
+    project_name, instructions_count, instructions = create_instructions(groups)
+    if project_name is None:
+        project_name = "PROJECT_NAME"
+
+    code = "import powermake\n\n\n"
+
+    code += "def on_build(config: powermake.Config):\n"
+    code += f"    config.nb_total_operations = {instructions_count}\n\n"
+    for instruction in instructions:
+        code += f"    {instruction}\n\n"
+
+    code += f"\n\npowermake.run({json.dumps(project_name)}, build_callback=on_build)\n"
+
+    return code
 
 
-project_name, instructions_count, instructions = create_instructions(groups)
-if project_name is None:
-    project_name = "PROJECT_NAME"
+if __name__ == "__main__":
+    print("====================================================")
+    print("==        Experimental PowerMake generator        ==")
+    print("==                                                ==")
+    print("==       This Program is not 100% reliable,       ==")
+    print("==      it will try to generate a PowerMake,      ==")
+    print("==   but you have to verify the generated file.   ==")
+    print("==    Watch out for the `powermake.run_command`   ==")
+    print("==     lines, they will most likely be wrong.     ==")
+    print("====================================================\n")
 
-code = "import powermake\n\n\n"
+    if len(sys.argv) > 1:
+        makefile_folder = sys.argv[1]
+    else:
+        makefile_folder = input("Enter makefile's folder path: ")
 
-code += "def on_build(config: powermake.Config):\n"
-code += f"    config.nb_total_operations = {instructions_count}\n\n"
-for instruction in instructions:
-    code += f"    {instruction}\n\n"
-
-code += f"\n\npowermake.run({json.dumps(project_name)}, build_callback=on_build)\n"
-
-with open("generated.py", "w") as file:
-    file.write(code)
+    code = generate_code(makefile_folder)
+    with open("generated.py", "w") as file:
+        file.write(code)
 
