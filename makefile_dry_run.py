@@ -81,13 +81,22 @@ def list_commands(commands: list[str], dir: str = "."):
         for cwd, cmd in split_commands_by_cwd(command, dir):
             cmake_found, make_found, neutralized_command = neutralize_make(cmd)
             if make_found:
-                final_commands.extend(list_commands(subprocess.check_output(neutralized_command, shell=True, cwd=cwd).decode().split('\n'), dir))
+                final_commands.extend(list_commands(subprocess.check_output(neutralized_command, shell=True, cwd=cwd).decode().split('\n'), cwd))
             elif cmake_found:
                 if neutralized_command is not None:
                     file = open(os.path.join(cwd, neutralized_command), "r")
-                    final_commands.append((cwd, file.read().strip()))
+                    cmds = file.read().split('\n')
                     file.close()
+                    for i in range(len(cmds)):
+                        cmds[i] = cmds[i].strip()
+                    final_commands.extend(list_commands(cmds, cwd))
             else:
+                splitted = shlex.split(cmd)
+                if len(splitted) > 0 and sh_which_cache(splitted[0]).endswith(("-ranlib", "/ranlib")) and len(final_commands) > 0:
+                    splitted = shlex.split(final_commands[-1][1])
+                    if len(splitted) > 0 and sh_which_cache(splitted[0]).endswith(("-ar", "/ar")) and "ar -s " not in final_commands[-1][1]:
+                        final_commands[-1] = (final_commands[-1][0], final_commands[-1][1].replace("ar ", "ar -s "))
+                        continue  # skip this ranlib command, we applied it to the ar command above
                 final_commands.append((cwd, cmd))
     return final_commands
 

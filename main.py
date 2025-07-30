@@ -23,6 +23,16 @@ def is_compiler(binary: str):
 def is_archiver(binary: str):
     return makefile_dry_run.sh_which_cache(binary).endswith(("-ar", "/ar"))
 
+
+def is_so_version(string: str) -> bool:
+    i = len(string) - 1
+    while i > 0 and (string[i].isdigit() or string[i] == '.'):
+        i -= 1
+    if i <= 0:
+        return False
+    return string[:i+1].endswith(".so")
+
+
 def all_startswith(files: list[str], prefix: str):
     for file in files:
         if not file.startswith(prefix):
@@ -89,7 +99,6 @@ def get_best_glob_match(files: list[str]):
             filter_suffix = longest_suffix(exceptions)
             if one_match(files_fullpath, filter_prefix, filter_suffix):
                 # game over, we need to add each file one by one
-                print("game over")
                 if len(files_fullpath) <= len(exceptions):
                     # It's more interesting to just add each file one by one
                     get_patterns.extend(files_fullpath)
@@ -170,17 +179,24 @@ def extract_compiler_command(command: list[str], cwd: str):
     return operation_type, defines, includedirs, remaining_args, inputfiles, outputfile
 
 def extract_archiver_command(command: list[str], cwd: str):
+    args = []
     inputfiles = []
     outputfile = None
-    for el in command:
+    for el in command[1:]:
         if el.startswith("-"):
-            continue
-        if el.endswith(".a"):
+            arg = el.replace('r', '').replace('q', '').replace('c', '')
+            if len(arg) > 0 and arg != '-':
+                args.append(arg)
+        elif el.endswith(".a"):
             outputfile = os.path.join(cwd, el)
         elif outputfile is not None:
             inputfiles.append(os.path.join(cwd, el))
+        else:
+            arg = el.replace('r', '').replace('q', '').replace('c', '')
+            if len(arg) > 0 and arg != '-':
+                args.append(arg)
 
-    return "archive", inputfiles, outputfile
+    return "archive", args, inputfiles, outputfile
 
 def check_deps(commands, i, current_num):
     for j in range(i, len(commands)):
@@ -210,17 +226,19 @@ def create_compilation_groups(entries):
     for entry in entries:
         outputfile = None
         command = shlex.split(entry[1])
+        if len(command) == 0:
+            continue
         if is_compiler(command[0]):
             cmd = [0, *extract_compiler_command(command, entry[0])]
             outputfile = cmd[6]
         elif is_archiver(command[0]):
             cmd = [0, *extract_archiver_command(command, entry[0])]
-            outputfile = cmd[3]
+            outputfile = cmd[4]
         elif makefile_dry_run.sh_which_cache(command[0]) in commands_to_filters:
             # don't keep mkdir, echo and printf, PowerMake will do most of them anyway
             continue
         else:
-            commands.append([0, entry[1]])
+            commands.append([0, entry[1], entry[0]])
             continue
 
         if outputfile is not None and outputfile not in _output_set:
@@ -238,8 +256,6 @@ def create_compilation_groups(entries):
             current_num += 1
         commands[i][0] = current_num
 
-    print(json.dumps(commands, indent=4))
-
     commands.sort(reverse=True)
 
     groups = []
@@ -248,18 +264,18 @@ def create_compilation_groups(entries):
     group_template = None
 
     for command in commands:
-        if len(command) == 2:
-            groups.append({"operation_type": "command", "defines": [], "includedirs": [], "args": [], "files": [], "command": command[1]})
+        if len(command) == 3:
+            groups.append({"operation_type": "command", "defines": [], "includedirs": [], "args": [], "files": [], "command": command[1], "command_cwd": command[2]})
             group_n += 1
             group_template = command
             continue
         if command[1] == "archive":
-            groups.append({"operation_type": "archive", "defines": [], "includedirs": [], "args": [], "files": [{"dependencies": command[2], "output": command[3]}], "command": None})
+            groups.append({"operation_type": "archive", "defines": [], "includedirs": [], "args": command[2], "files": [{"dependencies": command[3], "output": command[4]}], "command": None, "command_cwd": None})
             group_n += 1
             group_template = command
             continue
         if group_template is None or group_template[:5] != command[:5] or command[1] != "compile":
-            groups.append({"operation_type": command[1], "defines": command[2], "includedirs": command[3], "args": command[4], "files": [], "command": None})
+            groups.append({"operation_type": command[1], "defines": command[2], "includedirs": command[3], "args": command[4], "files": [], "command": None, "command_cwd": None})
             group_n += 1
             group_template = command
         groups[group_n]["files"].append({"dependencies": command[5], "output": command[6]})
@@ -276,7 +292,7 @@ def create_compilation_groups(entries):
                 break
         if must_split:
             group = groups.pop(i)
-            group1 = {"operation_type": group["operation_type"], "defines": group["defines"], "includedirs": group["includedirs"], "args": group["args"], "command": group["command"], "files": []}
+            group1 = {"operation_type": group["operation_type"], "defines": group["defines"], "includedirs": group["includedirs"], "args": group["args"], "command": group["command"], "command_cwd": group["command_cwd"], "files": []}
             group2 = {**group1, "files": []}
             for file in group["files"]:
                 if file["output"] in used:
@@ -288,15 +304,15 @@ def create_compilation_groups(entries):
         else:
             i += 1
 
-    print(json.dumps(groups, indent=4))
-
     return groups
 
 def create_instructions(groups):
     instructions: list[str] = []
-    last_function_state = {"defines": [], "includedirs": [], "c_flags": [], "cpp_flags": [], "as_flags": [], "asm_flags": [], "rc_flags": [], "ld_flags": [], "shared_linker_flags": []}
-    archive_variables = {}
+    last_function_state = {"defines": [], "includedirs": [], "c_flags": [], "cpp_flags": [], "as_flags": [], "asm_flags": [], "rc_flags": [], "ld_flags": [], "shared_linker_flags": [], "ar_flags": []}
+    archives_variables = {}
     archives_var_counter = 0
+    shared_libs_variables = {}
+    shared_libs_var_counter = 0
     objects_variables = {}
     objects_var_counter = 0
     project_name = None
@@ -307,7 +323,7 @@ def create_instructions(groups):
         instructions_count += len(group["files"])
 
         if group["operation_type"] == "command":
-            instructions.append(f"powermake.run_command(config, {json.dumps(group['command'])}, shell=True)")
+            instructions.append(f"powermake.run_command(config, {json.dumps(group['command'])}, shell=True, cwd={json.dumps(group['command_cwd'])})")
             continue
 
         elif group["operation_type"] == "compile":
@@ -333,7 +349,7 @@ def create_instructions(groups):
         elif group["operation_type"] == "shared_link":
             function_state["shared_linker_flags"] = group["args"]
         elif group["operation_type"] == "archive":
-            pass
+            function_state["ar_flags"] = group["args"]
 
         for key in last_function_state:
             to_add = set(function_state[key]).difference(last_function_state[key])
@@ -363,12 +379,17 @@ def create_instructions(groups):
             variables_union = set()
             count = objects_var_counter
             required_mixed = flatten([file["dependencies"] for file in group["files"]])
-            required_objects = {obj for obj in required_mixed if not obj.endswith(".a")}
+            required_objects = {obj for obj in required_mixed if not obj.endswith(".a") and not is_so_version(obj)}
             required_archives = [os.path.splitext(os.path.basename(archive))[0] for archive in required_mixed if archive.endswith(".a")]
+            required_shared_libs = [os.path.splitext(os.path.basename(lib))[0] for lib in required_mixed if is_so_version(lib)]
+
             archives_variables_list = []
             for archive in required_archives:
-                if archive in archive_variables:
-                    archives_variables_list.append(archive_variables[archive])
+                if archive in archives_variables:
+                    archives_variables_list.append(archives_variables[archive])
+            for lib in required_shared_libs:
+                if lib in shared_libs_variables:
+                    archives_variables_list.append(shared_libs_variables[lib])
 
             while count > 0 and len(required_objects.difference(variables_union)) > 0:
                 if len(objects_variables[f"objects{count}"].intersection(required_objects)) > 0 and len(objects_variables[f"objects{count}"].difference(variables_union)) > 0:
@@ -407,10 +428,12 @@ def create_instructions(groups):
                 project_name = target_name
                 instructions.append(f"powermake.link_files(config, {objects_var}{archives_list_str}, executable_name={json.dumps(target_name)})")
             elif group["operation_type"] == "shared_link":
-                instructions.append(f"powermake.link_shared_lib(config, {objects_var}{archives_list_str}, lib_name={json.dumps(target_name)})")
+                shared_libs_var_counter += 1
+                shared_libs_variables[target_name] = f"shared_lib{shared_libs_var_counter}"
+                instructions.append(f"shared_lib{shared_libs_var_counter} = powermake.link_shared_lib(config, {objects_var}{archives_list_str}, lib_name={json.dumps(target_name)})")
             elif group["operation_type"] == "archive":
                 archives_var_counter += 1
-                archive_variables[target_name] = f"archives{archives_var_counter}"
+                archives_variables[target_name] = f"archives{archives_var_counter}"
                 instructions.append(f"archives{archives_var_counter} = powermake.archive_files(config, {objects_var}, archive_name={json.dumps(target_name)})")
 
 
@@ -420,7 +443,7 @@ def create_instructions(groups):
 
 
 
-entries = makefile_dry_run.list_commands(["make"], "/home/mactul/Documents/c-cpp/Console-Chess/20.01.2020/build")
+entries = makefile_dry_run.list_commands(["make"], "/home/mactul/Documents/c-cpp/plasma-keyboard/build")
 groups = create_compilation_groups(entries)
 
 
