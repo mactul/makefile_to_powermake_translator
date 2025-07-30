@@ -99,12 +99,3 @@ def list_commands(commands: list[str], dir: str = "."):
                         continue  # skip this ranlib command, we applied it to the ar command above
                 final_commands.append((cwd, cmd))
     return final_commands
-
-if __name__ == '__main__':
-    commands = list_commands(["make"], "/home/mactul/Documents/c-cpp/boringssl/build")
-
-    for cmd in commands:
-        print(cmd)
-        print()
-
-    print(len(commands))
