@@ -15,6 +15,8 @@ def is_compiler(binary: str):
         "/g++",
         "-clang",
         "/clang",
+        "-clang++",
+        "/clang++",
         "-cc",
         "/cc",
         "-c++",
