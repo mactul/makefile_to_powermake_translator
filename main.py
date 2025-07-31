@@ -3,12 +3,16 @@ import sys
 import json
 import glob
 import shlex
+import typing as T
 
 import makefile_dry_run
 
 
-def is_compiler(binary: str):
-    return makefile_dry_run.sh_which_cache(binary).endswith((
+def is_compiler(binary: str) -> bool:
+    binary_fullpath = makefile_dry_run.sh_which_cache(binary)
+    if binary_fullpath is None:
+        return False
+    return binary_fullpath.endswith((
         "-gcc",
         "/gcc",
         "-g++",
@@ -23,8 +27,12 @@ def is_compiler(binary: str):
         "/c++"
     ))
 
-def is_archiver(binary: str):
-    return makefile_dry_run.sh_which_cache(binary).endswith(("-ar", "/ar"))
+
+def is_archiver(binary: str) -> bool:
+    binary_fullpath = makefile_dry_run.sh_which_cache(binary)
+    if binary_fullpath is None:
+        return False
+    return binary_fullpath.endswith(("-ar", "/ar"))
 
 
 def is_so_version(string: str) -> bool:
@@ -36,43 +44,43 @@ def is_so_version(string: str) -> bool:
     return string[:i+1].endswith(".so")
 
 
-def all_startswith(files: list[str], prefix: str):
+def all_startswith(files: T.Iterable[str], prefix: str) -> bool:
     for file in files:
         if not file.startswith(prefix):
             return False
     return True
 
-def all_endswith(files: list[str], suffix: str):
+def all_endswith(files: T.Iterable[str], suffix: str) -> bool:
     for file in files:
         if not file.endswith(suffix):
             return False
     return True
 
-def one_match(files: list[str], prefix: str, suffix: str):
+def one_match(files: T.Iterable[str], prefix: str, suffix: str) -> bool:
     for file in files:
         if file.startswith(prefix) and file.endswith(suffix):
             return True
     return False
 
-def longest_prefix(files: list[str]):
+def longest_prefix(files: T.Iterable[str]) -> str:
     base = next(iter(files))
     i = 1
     while i <= len(base) and all_startswith(files, base[:i]):
         i += 1
     return base[:i-1]
 
-def longest_suffix(files: list[str]):
+def longest_suffix(files: T.Iterable[str]) -> str:
     base = next(iter(files))
     i = len(base)-1
     while i >= 0 and all_endswith(files, base[i:]):
         i -= 1
     return base[i+1:]
 
-def get_best_glob_match(files: list[str]):
+def get_best_glob_match(files: T.Iterable[str]) -> T.Tuple[T.List[str], T.List[str]]:
     get_patterns = []
     filter_patterns = []
 
-    files_grouped = {}
+    files_grouped: T.Dict[str, T.Set[str]] = {}
     for file in files:
         dir = os.path.dirname(file)
         if dir not in files_grouped:
@@ -116,23 +124,23 @@ def get_best_glob_match(files: list[str]):
     return get_patterns, filter_patterns
 
 
-def flatten(l: list) -> list[str]:
-    o = []
+def flatten(l: T.List[T.Any]) -> T.List[str]:
+    o: T.List[str] = []
     for e in l:
         if isinstance(e, list):
             o.extend(flatten(e))
         else:
-            o.append(e)
+            o.append(str(e))
     return o
 
 
-def extract_compiler_command(command: list[str], cwd: str):
-    defines = []
-    includedirs = []
-    remaining_args = []
-    inputfiles = []
-    outputfile = None
-    operation_type = "link"
+def extract_compiler_command(command: T.List[str], cwd: str) -> T.Tuple[T.Literal["compile", "link", "shared_link"], T.List[str], T.List[str], T.List[T.Union[str, T.Tuple[str, ...]]], T.List[str], T.Union[str, None]]:
+    defines: T.List[str] = []
+    includedirs: T.List[str] = []
+    remaining_args: T.List[str] = []
+    inputfiles: T.List[str] = []
+    outputfile: T.Union[str, None] = None
+    operation_type: T.Literal["compile", "link", "shared_link"] = "link"
     i = 1
     while i < len(command):
         if command[i] == "-D":
@@ -176,7 +184,7 @@ def extract_compiler_command(command: list[str], cwd: str):
 
         i += 1
 
-    args = []
+    args: T.List[T.Union[str, T.Tuple[str, ...]]] = []
     for arg in remaining_args:
         if arg.startswith("-"):
             args.append(arg)
@@ -195,7 +203,7 @@ def extract_compiler_command(command: list[str], cwd: str):
     return operation_type, defines, includedirs, args, inputfiles, outputfile
 
 
-def extract_archiver_command(command: list[str], cwd: str):
+def extract_archiver_command(command: T.List[str], cwd: str) -> T.Tuple[T.Literal["archive"], T.List[str], T.List[str], T.Union[str, None]]:
     args = []
     inputfiles = []
     outputfile = None
@@ -215,7 +223,7 @@ def extract_archiver_command(command: list[str], cwd: str):
 
     return "archive", args, inputfiles, outputfile
 
-def check_deps(commands, i, current_num):
+def check_deps(commands: T.List[T.List[T.Any]], i: int, current_num: int) -> bool:
     for j in range(i, len(commands)):
         if commands[j][0] != current_num:
             # The parallelization is discontinued here, no need to look after
@@ -227,16 +235,16 @@ def check_deps(commands, i, current_num):
     return True
 
 
-def used_unused(group, group_deps):
-    required_files = set(flatten(file["dependencies"] for file in group["files"]))
+def used_unused(group: T.Dict[str, T.Any], group_deps: T.Dict[str, T.Any]) -> T.Tuple[T.Set[str], T.Set[str]]:
+    required_files = set(flatten([file["dependencies"] for file in group["files"]]))
     deps_files = {file["output"] for file in group_deps["files"]}
 
     return required_files.intersection(deps_files), deps_files.difference(required_files)
 
 
 
-def create_compilation_groups(entries):
-    commands = []
+def create_compilation_groups(entries: T.List[T.Tuple[str, str]]) -> T.List[T.Dict[str, T.Any]]:
+    commands: T.List[T.List[T.Any]] = []
 
     commands_to_filters = (makefile_dry_run.sh_which_cache("mkdir") or "mkdir", makefile_dry_run.sh_which_cache("echo") or "echo", makefile_dry_run.sh_which_cache("printf") or "printf")
     _output_set = set()
@@ -275,7 +283,7 @@ def create_compilation_groups(entries):
 
     commands.sort(reverse=True)
 
-    groups = []
+    groups: T.List[T.Dict[str, T.Any]] = []
 
     group_n = -1
     group_template = None
@@ -300,8 +308,8 @@ def create_compilation_groups(entries):
     i = 0
     while i < len(groups):
         must_split = False
-        used = set()
-        unused = set()
+        used: T.Set[str] = set()
+        unused: T.Set[str] = set()
         for j in range(i, len(groups)):
             used, unused = used_unused(groups[j], groups[i])
             if len(used) > 0 and len(unused) > 0:
@@ -323,16 +331,16 @@ def create_compilation_groups(entries):
 
     return groups
 
-def create_instructions(groups):
-    instructions: list[str] = []
-    last_function_state = {"defines": [], "includedirs": [], "c_flags": [], "cpp_flags": [], "as_flags": [], "asm_flags": [], "rc_flags": [], "ld_flags": [], "shared_linker_flags": [], "ar_flags": []}
-    archives_variables = {}
+def create_instructions(groups: T.List[T.Dict[str, T.Any]]) -> T.Tuple[T.Union[str, None], int, T.List[str]]:
+    instructions: T.List[str] = []
+    last_function_state: T.Dict[str, T.List[T.Union[str, T.Tuple[str, ...]]]] = {"defines": [], "includedirs": [], "c_flags": [], "cpp_flags": [], "as_flags": [], "asm_flags": [], "rc_flags": [], "ld_flags": [], "shared_linker_flags": [], "ar_flags": []}
+    archives_variables: T.Dict[str, str] = {}
     archives_var_counter = 0
-    shared_libs_variables = {}
+    shared_libs_variables: T.Dict[str, str] = {}
     shared_libs_var_counter = 0
-    objects_variables = {}
+    objects_variables: T.Dict[str, T.Set[str]] = {}
     objects_var_counter = 0
-    project_name = None
+    project_name: T.Union[str, None] = None
     instructions_count = 0
     for group in groups:
         function_state = {**last_function_state}
@@ -394,8 +402,8 @@ def create_instructions(groups):
             target_name = os.path.splitext(os.path.basename(next(iter(group["files"]))["output"]))[0]
             if project_name is None:
                 project_name = target_name
-            variables_names = set()
-            variables_union = set()
+            variables_names: T.Set[str] = set()
+            variables_union: T.Set[str] = set()
             count = objects_var_counter
             required_mixed = flatten([file["dependencies"] for file in group["files"]])
             required_objects = {obj for obj in required_mixed if not obj.endswith(".a") and not is_so_version(obj)}
@@ -461,7 +469,7 @@ def create_instructions(groups):
     return project_name, instructions_count, instructions
 
 
-def generate_code(makefile_folder):
+def generate_code(makefile_folder: str) -> str:
     entries = makefile_dry_run.list_commands(["make"], makefile_folder)
     groups = create_compilation_groups(entries)
 
@@ -472,7 +480,7 @@ def generate_code(makefile_folder):
 
     code = "import powermake\n\n\n"
 
-    code += "def on_build(config: powermake.Config):\n"
+    code += "def on_build(config: powermake.Config) -> None:\n"
     code += f"    config.nb_total_operations = {instructions_count}\n\n"
     for instruction in instructions:
         code += f"    {instruction}\n\n"
