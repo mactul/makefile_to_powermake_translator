@@ -172,14 +172,28 @@ def extract_compiler_command(command: list[str], cwd: str):
             elif command[i] not in ["-g", "-ggdb", "-fdiagnostics-color", "-O0", "-Og", "-O", "-O1", "-O2", "-O3", "-Os", "-Oz", "-Ofast", "-fomit-frame-pointer", "-M", "-MM", "-MG", "-MP", "-MD", "-MMD"] and not command[i].startswith("-Wl,--dependency-file="):
                 remaining_args.append(command[i])
         else:
-            inputfiles.append(os.path.join(cwd, command[i]))
+            remaining_args.append(command[i])
 
         i += 1
 
-    if operation_type == "compile":
-        inputfiles = [file for file in inputfiles if file.endswith((".c", ".cpp", ".cc", ".C", ".s", ".S", ".asm", ".rc"))]
+    args = []
+    for arg in remaining_args:
+        if arg.startswith("-"):
+            args.append(arg)
+        else:
+            if operation_type == "compile":
+                if arg.endswith((".c", ".cpp", ".cc", ".C", ".s", ".S", ".asm", ".rc")):
+                    inputfiles.append(os.path.join(cwd, arg))
+                elif len(args) > 0:
+                    if isinstance(args[-1], tuple):
+                        args[-1] = (*args[-1], arg)
+                    else:
+                        args[-1] = (args[-1], arg)
+            else:
+                inputfiles.append(os.path.join(cwd, arg))
 
-    return operation_type, defines, includedirs, remaining_args, inputfiles, outputfile
+    return operation_type, defines, includedirs, args, inputfiles, outputfile
+
 
 def extract_archiver_command(command: list[str], cwd: str):
     args = []
